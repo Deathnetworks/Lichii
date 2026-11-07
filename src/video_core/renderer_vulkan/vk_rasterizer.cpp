@@ -18,6 +18,7 @@
 #include <span>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -2152,10 +2153,59 @@ bool RasterizerVulkan::UsesNvidiaDlss() const {
     return texture_cache_runtime.UsesNvidiaDlss();
 }
 
+namespace {
+
+/// Whether a driver needs the game's native tensor programs (matrix multiplies) replaced by the
+/// upscale stand-in.
+///
+/// Mesa's Intel driver takes minutes to compile an emulated network (Ocarina of Time's has 768
+/// matrix multiplies) and then runs it at about 8 FPS. Intel's proprietary Windows driver (Arc
+/// B70 and friends) is just as slow, so it gets the stand-in as well.
+constexpr bool DriverNeedsTensorStandIn(VkDriverId driver_id) {
+    return driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA ||
+           driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
+}
+
+static_assert(DriverNeedsTensorStandIn(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA));
+static_assert(DriverNeedsTensorStandIn(VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS));
+static_assert(!DriverNeedsTensorStandIn(VK_DRIVER_ID_NVIDIA_PROPRIETARY));
+static_assert(!DriverNeedsTensorStandIn(VK_DRIVER_ID_AMD_PROPRIETARY));
+
+/// EDEN_NX2_INTEL_TENSOR_STANDIN=1 forces the stand-in, =0 forces the software emulation.
+/// Unset keeps the automatic behaviour.
+std::optional<bool> TensorStandInOverride() {
+    const char* const value = std::getenv("EDEN_NX2_INTEL_TENSOR_STANDIN");
+    if (value == nullptr || *value == '\0') {
+        return std::nullopt;
+    }
+    const std::string_view text{value};
+    if (text == "1" || text == "true" || text == "on") {
+        return true;
+    }
+    if (text == "0" || text == "false" || text == "off") {
+        return false;
+    }
+    return std::nullopt;
+}
+
+} // Anonymous namespace
+
 bool RasterizerVulkan::EmulatesNativeTensorPrograms() const {
-    // Mesa's Intel driver takes minutes to compile an emulated network (Ocarina of Time's has 768
-    // matrix multiplies) and then runs it at about 8 FPS. The upscale stand-in draws instead.
-    return device.GetDriverID() != VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
+    const VkDriverId driver_id = device.GetDriverID();
+    if (!DriverNeedsTensorStandIn(driver_id)) {
+        return true;
+    }
+    static const std::optional<bool> stand_in_override = TensorStandInOverride();
+    const bool emulate = stand_in_override.has_value() ? !*stand_in_override : false;
+    static std::once_flag logged;
+    std::call_once(logged, [&] {
+        LOG_INFO(HW_GPU,
+                 "Intel driver '{}': native tensor programs are {} (EDEN_NX2_INTEL_TENSOR_STANDIN={})",
+                 device.GetModelName(),
+                 emulate ? "emulated in software" : "rejected, the upscale stand-in draws",
+                 stand_in_override.has_value() ? (*stand_in_override ? "1" : "0") : "unset");
+    });
+    return emulate;
 }
 
 bool RasterizerVulkan::SupportsGameDlssNetwork() const {
