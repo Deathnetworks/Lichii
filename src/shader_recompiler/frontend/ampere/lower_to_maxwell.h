@@ -28,8 +28,6 @@ enum class TessellationStage {
 struct LoweringOptions {
     bool geometry{};
     bool tensor{};
-    /// Reject matrix multiplies instead of emulating them (KeplerCompute::EmulatesNativeTensorPrograms).
-    bool reject_matrix{};
     u64 native_code_address{};
     std::span<const u32> verified_traps{};
     TessellationStage tessellation_stage = TessellationStage::None;
@@ -1779,7 +1777,6 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             break;
         }
         case 0x23c: { // HMMA.1688/.16816.F16, software warp expansion (no tensor extension required).
-            if (options.reject_matrix) return fail(index, "native matrix multiply (not emulated on this host)");
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
             const u32 mode = insn.words[2] & ~0xffU;
             const u32 depth = mode == 0 ? 8U : 16U;
@@ -2543,7 +2540,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 (half && (bindless || offsets || !insn.Bits(60, 1) || insn.Bits(80, 1) ||
                           insn.Bits(91, 1) ||
                           (source_b != 255 && source_b >= register_limit) ||
-                          mask != 15 || dest >= register_limit || second_dest >= register_limit)) ||
+                          dest >= register_limit ||
+                          // Up to two taps pack into dest alone (mask 3 with no second register).
+                          (std::popcount(mask) > 2 && second_dest >= register_limit))) ||
                 (offsets && (bindless || source_b == 255 || (source_a != 255 && source_a >= 245))) ||
                 (per_tap && (bindless || depth || insn.Bits(80, 1) || insn.Bits(91, 1))) ||
                 insn.Bits(89, 1) || mask == 0 ||
@@ -2691,11 +2690,13 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{per_tap ? 2U : offsets ? 1U : 0U} << 54) | (u64{insn.Bits(87, 2)} << 56));
             }
             if (half) {
-                for (u32 i = 0; i < 2; ++i) {
+                // The gather writes its taps packed from R250; an odd last tap pairs with RZ.
+                const u32 taps = static_cast<u32>(std::popcount(mask));
+                for (u32 i = 0; i * 2 < taps; ++i) {
                     emit(0x5ca8000000000000ULL | predicate | 246 | (u64{1} << 8) | (u64{2} << 10) |
                          (u64{250 + i * 2} << 20));
                     emit(0x5ca8000000000000ULL | predicate | 247 | (u64{1} << 8) | (u64{2} << 10) |
-                         (u64{251 + i * 2} << 20));
+                         (u64{i * 2 + 1 < taps ? 251 + i * 2 : 255U} << 20));
                     emit(0x5c18000000000000ULL | predicate | (i == 0 ? dest : second_dest) |
                          (u64{247} << 8) | (u64{246} << 20) | (u64{16} << 39));
                 }
