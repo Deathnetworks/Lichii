@@ -1498,12 +1498,13 @@ bool Device::GetSuitability(bool requires_swapchain) {
         features.extended_dynamic_state3.extendedDynamicState3ColorBlendEquation = false;
     }
 
-    // Intel Windows < 27.20.100.0: Broken VertexInputDynamicState
-    // Same for NVIDIA Proprietary < 580.119.02, unknown when VIDS was first NOT broken
-    // Disable VertexInputDynamicState on old Intel Windows drivers
+    // Intel Windows < 27.20.100.xxxx (major < 101 in Intel's (major << 14) | build encoding):
+    // Broken VertexInputDynamicState. Modern Intel Arc Windows drivers use major >= 101 (e.g.
+    // 101.9150 = 0x001963BE).
+    // Same for NVIDIA Proprietary < 580.119.02, unknown when VIDS was first NOT broken.
     if (extensions.vertex_input_dynamic_state) {
-        const u32 version = (properties.properties.driverVersion << 3) >> 3;
-        if ((driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && version < VK_MAKE_API_VERSION(27, 20, 100, 0))
+        const u32 intel_major = properties.properties.driverVersion >> 14;
+        if ((driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS && intel_major < 101)
         || (driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY && properties.properties.driverVersion < NvidiaDriverVersion(580, 119, 2))) {
             LOG_WARNING(Render_Vulkan, "Disabling broken VK_EXT_vertex_input_dynamic_state");
             RemoveExtensionFeature(extensions.vertex_input_dynamic_state, features.vertex_input_dynamic_state, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
@@ -1561,8 +1562,19 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.depth_clip_control, features.depth_clip_control,
                                        VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
 
-    // VK_EXT_descriptor_buffer
-    extensions.descriptor_buffer = features.descriptor_buffer.descriptorBuffer;
+    // VK_KHR_buffer_device_address (core in Vulkan 1.2; FOR_EACH_VK_FEATURE_1_2 is skipped when
+    // instance_version >= 1.2, so sync extensions.buffer_device_address from the queried feature).
+    extensions.buffer_device_address = features.buffer_device_address.bufferDeviceAddress;
+    RemoveExtensionFeatureIfUnsuitable(extensions.buffer_device_address,
+                                       features.buffer_device_address,
+                                       VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+
+    // VK_EXT_descriptor_buffer: without bufferlessPushDescriptors, enabling descriptor buffers
+    // disables VK_KHR_push_descriptor across all pipelines and forces per-descriptor
+    // vkGetDescriptorEXT CPU loops on every draw (e.g. on Intel Arc).
+    extensions.descriptor_buffer = features.descriptor_buffer.descriptorBuffer &&
+                                   extensions.buffer_device_address &&
+                                   properties.descriptor_buffer.bufferlessPushDescriptors;
     RemoveExtensionFeatureIfUnsuitable(extensions.descriptor_buffer, features.descriptor_buffer,
                                        VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
 

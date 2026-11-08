@@ -427,6 +427,22 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
         &scheduler);
+    // On Intel Vulkan drivers (Mesa ANV and Intel Windows), Ocarina of Time's 768-HMMA sharpening
+    // network either hits unsupported E5B9G9R9 storage views or stalls at 5-8 fps in software
+    // matrix emulation. Default to the "No sharpening" bypass at rasterizer creation unless
+    // EDEN_NX2_INTEL_TENSOR_STANDIN=0 is explicitly set.
+    const VkDriverId driver_id = device.GetDriverID();
+    if ((driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA ||
+         driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) &&
+        Settings::values.oot_anti_aliasing.GetValue() == Settings::OotAntiAliasing::Game) {
+        const char* const env = std::getenv("EDEN_NX2_INTEL_TENSOR_STANDIN");
+        if (env == nullptr || std::string_view{env} != "0") {
+            Settings::values.oot_anti_aliasing.SetValue(Settings::OotAntiAliasing::NoSharpening);
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina of Time: anti-aliasing defaulted to No sharpening on Intel driver '{}'",
+                     device.GetModelName());
+        }
+    }
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -1003,21 +1019,23 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     const u64 draw_map_serial = gpu_memory->MapSerial();
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
-    const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
-        maxwell3d->regs, pipeline->HasDynamicVertexInput());
-    if (repack_dirty) {
-        auto& flags = maxwell3d->dirty.flags;
-        flags[VideoCommon::Dirty::VertexBuffers] = true;
-        flags[Dirty::VertexInput] = true;
-        for (u32 binding = 0; binding < 32; ++binding) {
-            if (repack_dirty & (1U << binding)) {
-                flags[VideoCommon::Dirty::VertexBuffer0 + binding] = true;
-            }
-        }
-    }
     const bool delta_holds =
         delta_pipeline != nullptr && DeltaStillHolds(draw_serial, draw_map_serial);
     const DrawPath path = delta_holds && !verify_pipeline ? DrawPath::Delta : DrawPath::Full;
+    if (path == DrawPath::Full) {
+        const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
+            maxwell3d->regs, pipeline->HasDynamicVertexInput());
+        if (repack_dirty) {
+            auto& flags = maxwell3d->dirty.flags;
+            flags[VideoCommon::Dirty::VertexBuffers] = true;
+            flags[Dirty::VertexInput] = true;
+            for (u32 binding = 0; binding < 32; ++binding) {
+                if (repack_dirty & (1U << binding)) {
+                    flags[VideoCommon::Dirty::VertexBuffer0 + binding] = true;
+                }
+            }
+        }
+    }
     if (path == DrawPath::Delta) {
         if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->ConfigureDelta(is_indexed)) {
             report_failure("configure failed");
@@ -1088,14 +1106,18 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
     }
 
-    {
-        Profile::Scope scope{Profile::Zone::DynamicState};
-        UpdateDynamicStates(pipeline);
+    if (path == DrawPath::Full) {
+        {
+            Profile::Scope scope{Profile::Zone::DynamicState};
+            UpdateDynamicStates(pipeline);
+        }
+        query_cache.NotifySegment(true);
+        HandleTransformFeedback();
+        query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                                  maxwell3d->regs.zpass_pixel_count_enable);
+    } else {
+        query_cache.NotifySegment(true);
     }
-
-    query_cache.NotifySegment(true);
-    HandleTransformFeedback();
-    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
         scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());
@@ -1607,6 +1629,7 @@ void RasterizerVulkan::TrackOotTonemappedImage(const GraphicsPipeline& pipeline)
     if (oot_network_bypass.tonemapped.Address() != target.Address()) {
         LOG_INFO(Render_Vulkan, "Ocarina of Time: tonemapped image at {:#x} {}x{}", target.Address(),
                  target.width, target.height);
+        oot_network_bypass.output_replaced.store(true, std::memory_order_relaxed);
     }
     oot_network_bypass.tonemapped = target;
 }

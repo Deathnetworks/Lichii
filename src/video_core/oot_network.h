@@ -45,7 +45,10 @@ struct BypassState {
     std::mutex mutex;
     /// Render target 0 of the latest tonemap draw (address 0 until one is seen), under mutex.
     Tegra::Engines::Maxwell3D::Regs::RenderTargetConfig tonemapped{};
-    std::atomic<bool> output_replaced{}; ///< the latest output pass was replaced
+    /// Starts true so once tonemapped is non-zero on the first gameplay frame, PrepassProgramKey
+    /// and the 768-HMMA NetworkProgramKey are skipped immediately before OutputProgramKey runs;
+    /// cleared to false if OutputProgramKey's copy ever fails.
+    std::atomic<bool> output_replaced{true};
 };
 
 inline bool BypassEnabled(u64 program_id) {

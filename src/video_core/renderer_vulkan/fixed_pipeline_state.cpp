@@ -195,7 +195,8 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
                          : 0;
     point_size = std::bit_cast<u32>(regs.point_size);
 
-    if (maxwell3d.dirty.flags[Dirty::VertexInput]) {
+    const bool vertex_input_dirty = maxwell3d.dirty.flags[Dirty::VertexInput];
+    if (vertex_input_dirty) {
         if (features.has_dynamic_vertex_input) {
             // Dirty flag will be reset by the command buffer update
             static constexpr std::array LUT{
@@ -277,7 +278,8 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     if (xfb_enabled) {
         RefreshXfbState(xfb_state, regs);
     }
-    if (!dynamic_vertex_input && features.has_static_vertex_repack) {
+    if (!dynamic_vertex_input && features.has_static_vertex_repack &&
+        (vertex_input_dirty || !extended_dynamic_state)) {
         const u32 repack_mask = VertexRepackMask(regs);
         // Refresh from guest values even when only the stride changed: offsets must not accumulate.
         for (size_t index = 0; index < attributes.size(); ++index) {
