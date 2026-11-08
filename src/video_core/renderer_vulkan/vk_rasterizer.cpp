@@ -2914,6 +2914,13 @@ bool RasterizerVulkan::EmulatesNativeTensorPrograms() const {
     }
     static const std::optional<bool> stand_in_override = TensorStandInOverride();
     const bool emulate = stand_in_override.has_value() ? !*stand_in_override : false;
+    // Where the tensor stand-in is active the game's own network can't run either, so Ocarina
+    // of Time's anti-aliasing defaults to the "No sharpening" bypass on these drivers.
+    if (!emulate &&
+        Settings::values.oot_anti_aliasing.GetValue() == Settings::OotAntiAliasing::Game) {
+        Settings::values.oot_anti_aliasing = Settings::OotAntiAliasing::NoSharpening;
+        LOG_INFO(HW_GPU, "tensor stand-in active: Ocarina of Time anti-aliasing defaults to No sharpening");
+    }
     static std::once_flag logged;
     std::call_once(logged, [&] {
         LOG_INFO(HW_GPU,

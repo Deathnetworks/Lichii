@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cstddef>
+#include <cstdlib>
 #include <future>
 #include <optional>
 #include <span>
@@ -107,7 +108,14 @@ namespace {
 
 [[nodiscard]] std::vector<const char*> Layers(bool enable_validation) {
     std::vector<const char*> layers;
-    if (enable_validation) {
+    // EDEN_NX2_NO_VALIDATION=1 keeps the validation layer off even when debug is on; on
+    // Intel's proprietary Windows driver it costs CPU on every Vulkan call. The launcher
+    // scripts set it (scripts/run_lichii.bat).
+    static const bool force_off = [] {
+        const char* const value = std::getenv("EDEN_NX2_NO_VALIDATION");
+        return value != nullptr && std::string{value} == "1";
+    }();
+    if (enable_validation && !force_off) {
         layers.push_back("VK_LAYER_KHRONOS_validation");
     }
     return layers;
