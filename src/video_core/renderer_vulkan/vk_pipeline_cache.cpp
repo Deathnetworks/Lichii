@@ -769,11 +769,11 @@ constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 // for a later precache.
 constexpr size_t PrecacheCaptureLimit = size_t{1} << 30;
 
-// EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
+// Builds every cached pipeline at boot by default (set EDEN_NX2_PRELOAD_ALL_PIPELINES=0 to disable).
 bool PreloadAllPipelines() {
     static const bool all = [] {
         const char* value = std::getenv("EDEN_NX2_PRELOAD_ALL_PIPELINES");
-        return value != nullptr && value[0] == '1';
+        return value == nullptr || value[0] != '0';
     }();
     return all;
 }
@@ -782,7 +782,7 @@ bool PreloadAllPipelines() {
 PipelineCache::~PipelineCache() {
     serialization_stop.request_stop();
     background_pipelines.Stop();
-    workers.WaitForRequests();
+    workers.WaitForRequests(serialization_stop.get_token());
     serialization_thread.WaitForRequests();
     SaveUsedPipelines();
     if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
@@ -1746,17 +1746,22 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    // EDEN_NX2_ASYNC_DISCARD=1: skip native draws whose pipeline is still building instead of
-    // waiting for it (experimental; the draw may be missing for a frame or more).
-    /// Reads EDEN_NX2_ASYNC_DISCARD once and logs when it is on.
-    static const bool discard_native = [] {
+    // EDEN_NX2_ASYNC_DISCARD=1 (default on Intel Arc when async shaders are enabled; set
+    // EDEN_NX2_ASYNC_DISCARD=0 to force waiting): skip native draws whose pipeline is still
+    // building on worker threads instead of freezing the GPU thread for up to 20s per shader.
+    static const int discard_native_env = [] {
         const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
-        const bool enabled = value != nullptr && value[0] == '1';
-        if (enabled) {
-            LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws skip unbuilt pipelines");
+        if (value == nullptr || value[0] == '\0') {
+            return -1;
         }
-        return enabled;
+        const bool enabled = value[0] == '1';
+        LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD={}: native draws {} unbuilt pipelines",
+                 enabled ? 1 : 0, enabled ? "skip" : "wait for");
+        return enabled ? 1 : 0;
     }();
+    const bool is_intel_driver =
+        device.GetDriverID() == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS ||
+        device.GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     // The environment variable wins over the setting; the setting is read per call.
@@ -1770,16 +1775,24 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
             mode = NativePendingMode::Skip;
             break;
         default:
+            if (is_intel_driver && discard_native_env != 0) {
+                mode = NativePendingMode::Skip;
+            }
             break;
         }
-        if (discard_native) {
+        if (discard_native_env == 1) {
             mode = NativePendingMode::Skip;
+        } else if (discard_native_env == 0) {
+            mode = NativePendingMode::Wait;
         }
     }
-    // Native draws are judged by the heuristic only when a mode other than Wait is chosen.
-    const bool can_discard = CanDiscardPendingDraw(
-        native, maxwell3d->regs.zeta_enable != 0, draw_state.draw_element_count,
-        draw_state.draw_element_count, native && mode != NativePendingMode::Wait);
+    // Native draws in Skip mode (and indirect/mesh draws where draw_element_count is 0) skip
+    // waiting while worker threads compile the pipeline in the background.
+    const bool can_discard =
+        (native && mode == NativePendingMode::Skip) ||
+        CanDiscardPendingDraw(native, maxwell3d->regs.zeta_enable != 0,
+                              draw_state.draw_element_count, draw_state.draw_element_count,
+                              native && mode != NativePendingMode::Wait);
     bool discard = can_discard;
     if (native) {
         switch (DecideNativePending(mode, can_discard, native_wait_budget_us)) {

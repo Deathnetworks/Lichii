@@ -534,10 +534,10 @@ struct System::Impl {
         is_powered_on = false;
         exit_locked = false;
         exit_requested = false;
+        stop_event.request_stop();
         if (gpu_core)
             gpu_core->NotifyShutdown();
 
-        stop_event.request_stop();
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
         kernel.SuspendEmulation(true);

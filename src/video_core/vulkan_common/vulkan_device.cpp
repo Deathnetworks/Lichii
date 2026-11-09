@@ -684,7 +684,15 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         properties.properties.limits.maxVertexInputBindings = 32;
     }
 
-    const auto dyna_state = Settings::values.dyna_state.GetValue();
+    auto dyna_state = Settings::values.dyna_state.GetValue();
+    if ((is_intel_windows || driver_id == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA) &&
+        dyna_state == Settings::ExtendedDynamicState::EDS2) {
+        LOG_INFO(Render_Vulkan,
+                 "Intel driver '{}': upgrading ExtendedDynamicState from EDS2 to EDS3 to avoid "
+                 "baking blend and enable states into graphics pipeline keys",
+                 properties.driver.driverInfo);
+        dyna_state = Settings::ExtendedDynamicState::EDS3;
+    }
     switch (dyna_state) {
     case Settings::ExtendedDynamicState::Disabled:
         // Level 0: Disable all extended dynamic state extensions

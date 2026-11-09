@@ -147,7 +147,10 @@ struct GPU::Impl {
 
     void WaitForSyncOperation(const u64 fence) {
         std::unique_lock lck{sync_request_mutex};
-        sync_request_cv.wait(lck, [this, fence] { return CurrentSyncRequestFence() >= fence; });
+        sync_request_cv.wait(lck, [this, fence] {
+            return shutting_down.load(std::memory_order_relaxed) ||
+                   CurrentSyncRequestFence() >= fence;
+        });
     }
 
     void WaitForIdle() {
@@ -194,10 +197,24 @@ struct GPU::Impl {
     }
 
     void NotifyShutdown() {
-        gpu_thread.NotifyShutdown();
-        std::unique_lock lk{sync_mutex};
         shutting_down.store(true, std::memory_order::relaxed);
-        sync_cv.notify_all();
+        {
+            std::scoped_lock lk{sync_mutex};
+            sync_cv.notify_all();
+        }
+        {
+            std::scoped_lock lk{sync_request_mutex};
+            sync_request_cv.notify_all();
+        }
+        gpu_thread.NotifyShutdown();
+        {
+            std::scoped_lock lk{sync_mutex};
+            sync_cv.notify_all();
+        }
+        {
+            std::scoped_lock lk{sync_request_mutex};
+            sync_request_cv.notify_all();
+        }
     }
 
     /// Obtain the CPU Context

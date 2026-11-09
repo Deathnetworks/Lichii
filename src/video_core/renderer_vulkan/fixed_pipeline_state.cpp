@@ -105,7 +105,12 @@ void RefreshXfbState(VideoCommon::TransformFeedbackState& state, const Maxwell& 
 
 void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFeatures& features) {
     const Maxwell& regs = maxwell3d.regs;
-    const auto topology_ = maxwell3d.draw_manager.draw_state.topology;
+    const bool is_mesh = regs.IsMeshEnabled();
+    const bool has_tess = !is_mesh &&
+                          (regs.IsShaderConfigEnabled(Maxwell::ShaderType::TessellationInit) ||
+                           regs.IsShaderConfigEnabled(Maxwell::ShaderType::Tessellation));
+    const auto topology_ =
+        is_mesh ? Maxwell::PrimitiveTopology::Triangles : maxwell3d.draw_manager.draw_state.topology;
 
     driver_id = features.driver_id;
     driver_version = features.driver_version;
@@ -121,12 +126,16 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     xfb_enabled.Assign(regs.transform_feedback_enabled != 0);
     ndc_minus_one_to_one.Assign(regs.depth_mode == Maxwell::DepthMode::MinusOneToOne ? 1 : 0);
     polygon_mode.Assign(PackPolygonMode(regs.polygon_mode_front));
-    tessellation_primitive.Assign(static_cast<u32>(regs.tessellation.params.domain_type.Value()));
-    tessellation_spacing.Assign(static_cast<u32>(regs.tessellation.params.spacing.Value()));
-    tessellation_clockwise.Assign(regs.tessellation.params.output_primitives.Value() ==
-                                  Maxwell::Tessellation::OutputPrimitives::Triangles_CW);
+    tessellation_primitive.Assign(
+        has_tess ? static_cast<u32>(regs.tessellation.params.domain_type.Value()) : 0);
+    tessellation_spacing.Assign(
+        has_tess ? static_cast<u32>(regs.tessellation.params.spacing.Value()) : 0);
+    tessellation_clockwise.Assign(has_tess &&
+                                  regs.tessellation.params.output_primitives.Value() ==
+                                      Maxwell::Tessellation::OutputPrimitives::Triangles_CW);
     // The field holds 1..32 points; an unset (0) or oversized register would wrap or truncate.
-    patch_control_points_minus_one.Assign(std::clamp<u32>(regs.patch_vertices, 1, 32) - 1);
+    patch_control_points_minus_one.Assign(
+        has_tess ? (std::clamp<u32>(regs.patch_vertices, 1, 32) - 1) : 0);
     const bool can_collapse_topology_class =
         features.has_extended_dynamic_state && features.has_extended_dynamic_state_2;
     topology.Assign(can_collapse_topology_class
@@ -142,7 +151,7 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     alpha_test_func.Assign(PackComparisonOp(test_func));
     early_z.Assign(regs.mandated_early_z != 0 ? 1 : 0);
     depth_enabled.Assign(regs.zeta_enable != 0 ? 1 : 0);
-    depth_format.Assign(static_cast<u32>(regs.zeta.format));
+    depth_format.Assign(regs.zeta_enable != 0 ? static_cast<u32>(regs.zeta.format) : 0);
     y_negate.Assign(regs.window_origin.mode != Maxwell::WindowOrigin::Mode::UpperLeft ? 1 : 0);
 
     bool use_last_provoking_vertex = false;
@@ -166,9 +175,20 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
         }
     }
 
+    const bool is_line_topology =
+        !is_mesh &&
+        (topology_ == Maxwell::PrimitiveTopology::Lines ||
+         topology_ == Maxwell::PrimitiveTopology::LineLoop ||
+         topology_ == Maxwell::PrimitiveTopology::LineStrip ||
+         topology_ == Maxwell::PrimitiveTopology::LinesAdjacency ||
+         topology_ == Maxwell::PrimitiveTopology::LineStripAdjacency);
+    const bool uses_point_size =
+        !is_mesh && (topology_ == Maxwell::PrimitiveTopology::Points ||
+                     regs.IsShaderConfigEnabled(Maxwell::ShaderType::Geometry));
+
     provoking_vertex_last.Assign(use_last_provoking_vertex ? 1 : 0);
     conservative_raster_enable.Assign(regs.conservative_raster_enable != 0 ? 1 : 0);
-    smooth_lines.Assign(regs.line_anti_alias_enable != 0 ? 1 : 0);
+    smooth_lines.Assign(is_line_topology && regs.line_anti_alias_enable != 0 ? 1 : 0);
     alpha_to_coverage_enabled.Assign(regs.anti_alias_alpha_control.alpha_to_coverage != 0 ? 1 : 0);
     alpha_to_one_enabled.Assign(regs.anti_alias_alpha_control.alpha_to_one != 0 ? 1 : 0);
     app_stage.Assign(maxwell3d.engine_state);
@@ -179,8 +199,9 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
     line_stipple_factor = regs.line_stipple_params.factor;
     line_stipple_pattern = regs.line_stipple_params.pattern;
 
+    const size_t active_rt_count = std::min<size_t>(regs.rt_control.count, regs.rt.size());
     for (size_t i = 0; i < regs.rt.size(); ++i) {
-        color_formats[i] = static_cast<u8>(regs.rt[i].format);
+        color_formats[i] = i < active_rt_count ? static_cast<u8>(regs.rt[i].format) : 0;
     }
     // The reference is part of the pipeline only while the test compares with it: title 1
     // animates the register with the test off (text fading in and out), which made a new
@@ -193,12 +214,16 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
                              packed_alpha_test != PackComparisonOp(Maxwell::ComparisonOp::Always_GL)
                          ? std::bit_cast<u32>(std::round(regs.alpha_test_ref * 255.0f) / 255.0f)
                          : 0;
-    point_size = std::bit_cast<u32>(regs.point_size);
+    point_size = uses_point_size ? std::bit_cast<u32>(regs.point_size) : 0;
 
     const bool vertex_input_dirty = maxwell3d.dirty.flags[Dirty::VertexInput];
-    if (vertex_input_dirty) {
-        if (features.has_dynamic_vertex_input) {
-            // Dirty flag will be reset by the command buffer update
+    if (features.has_dynamic_vertex_input) {
+        if (is_mesh) {
+            // Mesh pipelines have no vertex input stage; zero attribute_types so leftover
+            // vertex attributes from preceding non-mesh draws do not split mesh pipeline keys.
+            attribute_types = 0;
+        } else {
+            // Recompute for non-mesh draws (including after a mesh draw zeroed attribute_types).
             static constexpr std::array LUT{
                 0u, // Invalid
                 1u, // SignedNorm
@@ -216,24 +241,24 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
                 const u32 type = LUT[static_cast<size_t>(attrs[i].type.Value())];
                 attribute_types |= static_cast<u64>(type & mask) << (i * 2);
             }
-        } else {
-            maxwell3d.dirty.flags[Dirty::VertexInput] = false;
-            enabled_divisors = 0;
-            for (size_t index = 0; index < Maxwell::NumVertexArrays; ++index) {
-                const bool is_enabled = regs.vertex_stream_instances.IsInstancingEnabled(index);
-                binding_divisors[index] = is_enabled ? regs.vertex_streams[index].frequency : 0;
-                enabled_divisors |= (is_enabled ? u64{1} : 0) << index;
-            }
-            for (size_t index = 0; index < Maxwell::NumVertexAttributes; ++index) {
-                const auto& input = regs.vertex_attrib_format[index];
-                auto& attribute = attributes[index];
-                attribute.raw = 0;
-                attribute.enabled.Assign(input.constant ? 0 : 1);
-                attribute.buffer.Assign(input.buffer);
-                attribute.offset.Assign(input.offset);
-                attribute.type.Assign(static_cast<u32>(input.type.Value()));
-                attribute.size.Assign(static_cast<u32>(input.size.Value()));
-            }
+        }
+    } else if (vertex_input_dirty) {
+        maxwell3d.dirty.flags[Dirty::VertexInput] = false;
+        enabled_divisors = 0;
+        for (size_t index = 0; index < Maxwell::NumVertexArrays; ++index) {
+            const bool is_enabled = regs.vertex_stream_instances.IsInstancingEnabled(index);
+            binding_divisors[index] = is_enabled ? regs.vertex_streams[index].frequency : 0;
+            enabled_divisors |= (is_enabled ? u64{1} : 0) << index;
+        }
+        for (size_t index = 0; index < Maxwell::NumVertexAttributes; ++index) {
+            const auto& input = regs.vertex_attrib_format[index];
+            auto& attribute = attributes[index];
+            attribute.raw = 0;
+            attribute.enabled.Assign(input.constant ? 0 : 1);
+            attribute.buffer.Assign(input.buffer);
+            attribute.offset.Assign(input.offset);
+            attribute.type.Assign(static_cast<u32>(input.type.Value()));
+            attribute.size.Assign(static_cast<u32>(input.size.Value()));
         }
     }
     if (maxwell3d.dirty.flags[Dirty::ViewportSwizzles]) {
@@ -261,6 +286,10 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
         {
             maxwell3d.dirty.flags[Dirty::Blending] = false;
             for (size_t index = 0; index < attachments.size(); ++index) {
+                if (index >= active_rt_count || color_formats[index] == 0) {
+                    attachments[index].raw = 0;
+                    continue;
+                }
                 attachments[index].Refresh(regs, index);
                 auto& attachment = attachments[index];
                 if (color_write_enable_dynamic && attachment.mask_r == 0 &&
@@ -372,7 +401,7 @@ void FixedPipelineState::DynamicState::Refresh(const Maxwell& regs) {
 void FixedPipelineState::DynamicState::Refresh2(const Maxwell& regs,
                                                 Maxwell::PrimitiveTopology topology_,
                                                 bool base_features_supported) {
-    logic_op.Assign(PackLogicOp(regs.logic_op.op));
+    logic_op.Assign(regs.logic_op.enable != 0 ? PackLogicOp(regs.logic_op.op) : 0);
 
     if (base_features_supported) {
         return;
