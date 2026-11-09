@@ -121,6 +121,13 @@ public:
         return true;
     }
 
+    // Drops tasks no worker has started. Running tasks still finish.
+    void ClearRequests() {
+        std::scoped_lock lock{queue_mutex};
+        work_scheduled -= requests.size();
+        requests = std::queue<Task>{};
+    }
+
     void WaitForRequests(std::stop_token stop_token = {}) {
         std::stop_callback callback(stop_token, [this] {
             for (auto& thread : threads) {
