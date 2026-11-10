@@ -1341,6 +1341,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     size_t graphics_records = 0;
     size_t compute_records = 0;
     size_t skipped_pipelines = 0;
+    size_t dropped_graphics = 0;
     size_t queued_graphics = 0;
     for (const CacheV2::LogRecord* const planned : plan) {
         const CacheV2::LogRecord& record = *planned;
@@ -1408,6 +1409,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         } else if (bytes <= PrebuildCaptureLimit - prebuild_bytes) {
             prebuild_bytes += bytes;
             prebuild.push_back({*key, std::move(payload)});
+        } else {
+            // Fits no queue: it would build lazily at first draw and be skipped meanwhile
+            // (Bounded async draws), leaving white where it renders. Count it so the log shows
+            // how much of the cache never gets prebuilt.
+            ++dropped_graphics;
         }
     }
 
@@ -1546,10 +1552,12 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
-    if (skipped_pipelines != 0) {
+    if (skipped_pipelines != 0 || dropped_graphics != 0) {
         LOG_INFO(Render_Vulkan,
-                 "{} cached graphics pipelines skipped at boot, {} {} for background prebuild",
-                 skipped_pipelines, precache ? prebuild.size() : deferred_pipelines,
+                 "{} cached graphics pipelines skipped at boot ({} dropped past all queue limits), "
+                 "{} {} for background prebuild",
+                 skipped_pipelines, dropped_graphics,
+                 precache ? prebuild.size() : deferred_pipelines,
                  precache ? "held" : "admitted");
     }
     {
