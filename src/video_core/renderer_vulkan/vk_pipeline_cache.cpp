@@ -2004,6 +2004,19 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
         StutterTrace::CountLookup(StutterTrace::Lookup::GraphicsPrebuilt);
     }
     if (!pipeline) {
+        // Creation failed (translation error, evicted record unusable): drop the entry so the
+        // next draw retries instead of skipping every draw with this key for the whole session.
+        // A key that keeps failing is logged once per 1000 attempts and then left alone.
+        static std::unordered_map<u64, u32> failed_attempts;
+        const u64 hash = graphics_key.Hash();
+        if (const u32 attempts = ++failed_attempts[hash]; attempts <= 3 || attempts % 1000 == 0) {
+            LOG_WARNING(Render_Vulkan,
+                        "Graphics pipeline {:016x} failed to build (attempt {}); {}", hash, attempts,
+                        attempts <= 3 ? "retrying on later draws" : "giving up on retries");
+        }
+        if (failed_attempts[hash] <= 3) {
+            graphics_cache.erase(pair->first);
+        }
         return nullptr;
     }
     constexpr auto save_interval = std::chrono::seconds{15};
