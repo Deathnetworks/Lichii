@@ -72,4 +72,18 @@ TEST_CASE("A profile reset opens the current user", "[core][acc]") {
     CHECK(manager.GetOpenUsers()[0] == *second);
 }
 
+TEST_CASE("A profile reset says whether it read profiles.dat", "[core][acc]") {
+    NandFixture fixture;
+    Settings::values.current_user = 0;
+    ProfileManager manager;
+    std::error_code error;
+    std::filesystem::remove_all(fixture.nand / "system", error);
+    manager.ResetUserSaveFile();
+    CHECK_FALSE(manager.UserSaveFileRead());
+
+    manager.WriteUserSaveFile();
+    manager.ResetUserSaveFile();
+    CHECK(manager.UserSaveFileRead());
+}
+
 } // namespace
