@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -54,7 +53,9 @@ public:
     /// Acquires the next image in the swapchain, waits as needed. Returns true when no image was
     /// acquired (out of date) and the swapchain has to be recreated first.
     /// `may_flush`: false on the async present thread (see Scheduler::Wait).
-    bool AcquireNextImage(bool may_flush = true);
+    /// `game_frame_presents`: how many presents show this game frame, its generated frames
+    /// included; Frame Pacing Mode targets game frames.
+    bool AcquireNextImage(bool may_flush = true, u32 game_frame_presents = 1);
 
     /// Presents the rendered image to the swapchain.
     void Present(VkSemaphore render_semaphore);
